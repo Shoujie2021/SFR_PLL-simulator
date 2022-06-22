@@ -52,6 +52,9 @@ class SrfPllPiController:
         self.mf = CONFIG["mains_frequency"]
         self.sf = CONFIG["switch_frequency"] * 1000
         self.Ts = 1/self.sf
+        self.CONST_S = 2*self.sf
+        self.CONST_S2 = self.CONST_S * self.CONST_S
+
         self.cycles = cycles
         self.total_steps = cycles * (self.sf//self.mf)
 
@@ -60,6 +63,10 @@ class SrfPllPiController:
         self.dqz = np.zeros((self.total_steps, 3), dtype=float)
         self.theta = np.zeros((self.total_steps, 1), dtype=float)
         self.phi = np.zeros((self.total_steps, 1), dtype=float)
+
+        self.phi_a = 0.0
+        self.phi_b = -SHIFT
+        self.phi_c = SHIFT
 
         self._Kp = 50.0
         self._Ki = 500.0
@@ -71,8 +78,50 @@ class SrfPllPiController:
         '''
         self._Kw = 1000.0
         self.omega_max = 2*math.pi*self.mf
-        self.omega = np.zeros((self.total_steps, 1), dtype=float)
+        self.omega = np.full((self.total_steps, 1), 2*math.pi, dtype=float)
         self.theta_ref = np.zeros((self.total_steps, 1), dtype=float)
+
+        '''
+        SOGI
+        '''
+        self.k_sogi = 0.5
+        self.dc, self.qc = self.calculate_DC_QC()
+
+        self.abz = np.zeros((self.total_steps, 3), dtype=float)
+
+        self.alpha = np.zeros((self.total_steps, 1), dtype=float)
+        self.beta = np.zeros((self.total_steps, 1), dtype=float)
+        self.zero = np.zeros((self.total_steps, 1), dtype=float)
+
+        self.alpha_f_tmp = np.zeros((self.total_steps, 1), dtype=float)
+        self.alpha_f = np.zeros((self.total_steps, 1), dtype=float)
+        self.alpha_f_shifted = np.zeros((self.total_steps, 1), dtype=float)
+
+        self.beta_f_tmp = np.zeros((self.total_steps, 1), dtype=float)
+        self.beta_f = np.zeros((self.total_steps, 1), dtype=float)
+        self.beta_f_shifted = np.zeros((self.total_steps, 1), dtype=float)
+
+        self.zero_f_tmp = np.zeros((self.total_steps, 1), dtype=float)
+        self.zero_f = np.zeros((self.total_steps, 1), dtype=float)
+        self.zero_f_shifted = np.zeros((self.total_steps, 1), dtype=float)
+
+        self.alpha_p = np.zeros((self.total_steps, 1), dtype=float)
+        self.alpha_n = np.zeros((self.total_steps, 1), dtype=float)
+        self.beta_p = np.zeros((self.total_steps, 1), dtype=float)
+        self.beta_n = np.zeros((self.total_steps, 1), dtype=float)
+
+        self.theta_ff = np.zeros((self.total_steps, 1), dtype=float)
+        self.theta_diff = np.zeros((self.total_steps, 1), dtype=float)
+        self.omega_ff = np.zeros((self.total_steps, 1), dtype=float)
+        self.lpf_omega_a = 50*self.Ts/(1+50*self.Ts)
+
+        self.V_p = np.zeros((self.total_steps, 1), dtype=float)
+        self.V_n = np.zeros((self.total_steps, 1), dtype=float)
+        self.V_0 = np.zeros((self.total_steps, 1), dtype=float)
+
+        self.theta_p = np.zeros((self.total_steps, 1), dtype=float)
+        self.theta_n = np.zeros((self.total_steps, 1), dtype=float)
+        self.theta_0 = np.zeros((self.total_steps, 1), dtype=float)
 
     @property
     def Kp(self):
@@ -99,11 +148,12 @@ class SrfPllPiController:
         self._Kw = value
 
     def sim(self):
+
         for i in range(1, self.total_steps):
-            self.track(i)
+            self.sogi_track(i)
 
         xlim = self.cycles
-        fig, (ax1, ax2, ax3) = plt.subplots(3, 1)
+        fig, (ax1, ax2, ax3, ax4) = plt.subplots(4, 1)
         fig.subplots_adjust(hspace=0.5)
 
         ax1.set_xlabel('step')
@@ -121,8 +171,14 @@ class SrfPllPiController:
         ax3.set_xlim(0, xlim)
         ax3.grid(True)
 
+        ax4.set_xlabel('step')
+        ax4.set_ylabel('ABZ')
+        ax4.set_xlim(0, xlim)
+        ax4.grid(True)
+
         t = np.arange(0.0, xlim, self.mf/self.sf)
         ax1.plot(t, self.abc, label=["a", "b", "c"])
+        ax4.plot(t, self.abz, label=["alpha", "beta", "zero"])
         ax2.plot(t, self.dqz, label=["d", "q", "z"])
         ax3.plot(t, self.theta_ref, label="Theta ref")
         ax3.plot(t, self.theta, label="Theta")
@@ -132,6 +188,7 @@ class SrfPllPiController:
         ax1.legend()
         ax2.legend()
         ax3.legend()
+        ax4.legend()
         plt.show()
 
     def calculate_voltage_abc(self, phase=0.0, sf=1000.0, step=0):
@@ -166,7 +223,7 @@ class SrfPllPiController:
         self.theta_ref[step] = theta_a % (2*math.pi)
         return voltage_a, voltage_b, voltage_c
 
-    def calculate_alpha_beta_zero(self, a=0.0, b=0.0, c=0.0):
+    def calculate_abz(self, a=0.0, b=0.0, c=0.0):
         """
         Alpha Beta transform of a, b, c
         """
@@ -191,7 +248,182 @@ class SrfPllPiController:
 
         return d, q, z
 
-    def track(self, step):
+    def dq_from_ab(self, alpha=0.0, beta=0.0, theta=0.0):
+        d = math.cos(theta)*alpha + math.sin(theta)*beta
+        q = -math.sin(theta)*alpha + math.cos(theta)*beta
+        return d, q
+
+    def extract_ps(self, a=0.0, b=0.0, c=0.0):
+        """
+        Extract the positive sequence from the grid
+        :return: the positive sequence
+        """
+
+        a_p = a*math.cos(self.phi_a) + b*math.cos(self.phi_b + SHIFT) + c*math.cos(self.phi_c - SHIFT)
+        b_p = a*math.sin(self.phi_a) + b*math.sin(self.phi_b + SHIFT) + c*math.sin(self.phi_c - SHIFT)
+
+        v_p = math.sqrt(a_p*a_p + b_p*b_p)/3
+        phi_p = math.atan(b_p/a_p)
+        return v_p, phi_p
+
+    def extract_ns(self, a=0.0, b=0.0, c=0.0):
+        """
+        Extract the negative sequence from the grid
+        :return: the negative sequence
+        """
+
+        a_n = a*math.cos(self.phi_a) + b*math.cos(self.phi_b - SHIFT) + c*math.cos(self.phi_c + SHIFT)
+        b_n = a*math.sin(self.phi_a) + b*math.sin(self.phi_b - SHIFT) + c*math.sin(self.phi_c + SHIFT)
+
+        v_n = math.sqrt(a_n*a_n + b_n*b_n)
+        phi_n = math.atan(b_n/a_n)
+        return v_n, phi_n
+
+    def extract_zs(self, a=0.0, b=0.0, c=0.0):
+        """
+        Extract the zero sequence from the grid
+        :return: the zero sequence
+        """
+
+        a_z = a*math.cos(self.phi_a) + b*math.cos(self.phi_b) + c*math.cos(self.phi_c)
+        b_z = a*math.sin(self.phi_a) + b*math.sin(self.phi_b) + c*math.sin(self.phi_c)
+
+        v_z = math.sqrt(a_z*a_z + b_z*b_z)
+        phi_z = math.atan(b_z/a_z)
+        return v_z, phi_z
+
+    def calculate_DC_QC(self, omega=9.0*2.0*math.pi*50):
+        """
+        DCa0, DCa1, DCa2, DCb0, DCb1, DCb2
+        QCa0, QCa1, QCa2, QCb0, QCb1, QCb2
+        :return:
+        """
+        omega2 = omega * omega
+        kst = self.k_sogi*self.CONST_S*omega
+
+        dividend = self.CONST_S2 + kst + omega2
+
+        DCa0 = 1.0
+        DCa1 = (-2*self.CONST_S2 + 2*omega2)/dividend
+        DCa2 = (self.CONST_S2 - kst + omega2)/dividend
+
+        DCb0 = kst/dividend
+        DCb1 = 0.0
+        DCb2 = -DCb0
+
+        dc = (DCa0, DCa1, DCa2, DCb0, DCb1, DCb2)
+
+        QCa0 = 1.0
+        QCa1 = DCa1
+        QCa2 = DCa2
+
+        QCb0 = self.k_sogi*omega2/dividend
+        QCb1 = 2*QCb0
+        QCb2 = QCb0
+
+        qc = (QCa0, QCa1, QCa2, QCb0, QCb1, QCb2)
+
+        return dc, qc
+
+    def sogi_ds_qs(self, step, omega=1.0):
+        '''Calculate alpha_f and alpha_f_shifted'''
+        abz_a0 = self.abz[step][0]
+        abz_a1 = self.abz[step-1][0] if step-1 > 0 else 0.0
+        abz_a2 = self.abz[step-2][0] if step-2 > 0 else 0.0
+        alpha_f_tmp_1 = self.alpha_f_tmp[step-1] if step-1 > 0 else 0.0
+        alpha_f_tmp_2 = self.alpha_f_tmp[step-2] if step-2 > 0 else 0.0
+
+        self.alpha_f_tmp[step] = self.dc[3]*abz_a0 + self.dc[4]*abz_a1 + self.dc[5]*abz_a2 - \
+                                 self.dc[1]*alpha_f_tmp_1 - self.dc[2]*alpha_f_tmp_2
+
+        alpha_f_tmp_0 = self.alpha_f_tmp[step]
+        alpha_f_tmp_1 = self.alpha_f_tmp[step-1] if step-1 > 0 else 0.0
+        alpha_f_tmp_2 = self.alpha_f_tmp[step-2] if step-2 > 0 else 0.0
+        alpha_f_1 = self.alpha_f[step-1] if step-1 > 0 else 0.0
+        alpha_f_2 = self.alpha_f[step-2] if step-2 > 0 else 0.0
+
+        self.alpha_f[step] = self.dc[3]*alpha_f_tmp_0 + self.dc[4]*alpha_f_tmp_1 + self.dc[5]*alpha_f_tmp_2 - \
+                             self.dc[1]*alpha_f_1 - self.dc[2]*alpha_f_2
+
+        alpha_f_shifted_1 = self.alpha_f_shifted[step-1] if step-1 > 0 else 0.0
+        alpha_f_shifted_2 = self.alpha_f_shifted[step-2] if step-2 > 0 else 0.0
+        self.alpha_f_shifted[step] = self.qc[3]*alpha_f_tmp_0 + self.qc[4]*alpha_f_tmp_1 + self.qc[5]*alpha_f_tmp_2 - \
+                                     self.qc[1]*alpha_f_shifted_1 - self.qc[2]*alpha_f_shifted_2
+
+        '''Calculate beta_f and beta_f_shifted'''
+        abz_b0 = self.abz[step][1]
+        abz_b1 = self.abz[step-1][1] if step-1 > 0 else 0.0
+        abz_b2 = self.abz[step-2][1] if step-2 > 0 else 0.0
+        beta_f_tmp_1 = self.beta_f_tmp[step-1] if step-1 > 0 else 0.0
+        beta_f_tmp_2 = self.beta_f_tmp[step-2] if step-2 > 0 else 0.0
+
+        self.beta_f_tmp[step] = self.dc[3]*abz_a0 + self.dc[4]*abz_a1 + self.dc[5]*abz_a2 - \
+                                self.dc[1]*beta_f_tmp_1 - self.dc[2]*beta_f_tmp_2
+
+        beta_f_tmp_0 = self.beta_f_tmp[step]
+        beta_f_tmp_1 = self.beta_f_tmp[step-1] if step-1 > 0 else 0.0
+        beta_f_tmp_2 = self.beta_f_tmp[step-2] if step-2 > 0 else 0.0
+        beta_f_1 = self.beta_f[step-1] if step-1 > 0 else 0.0
+        beta_f_2 = self.beta_f[step-2] if step-2 > 0 else 0.0
+
+        self.beta_f[step] = self.dc[3]*beta_f_tmp_0 + self.dc[4]*beta_f_tmp_1 + self.dc[5]*beta_f_tmp_2 - \
+                            self.dc[1]*beta_f_1 - self.dc[2]*beta_f_2
+
+        beta_f_shifted_1 = self.beta_f_shifted[step-1] if step-1 > 0 else 0.0
+        beta_f_shifted_2 = self.beta_f_shifted[step-2] if step-2 > 0 else 0.0
+        self.beta_f_shifted[step] = self.qc[3]*beta_f_tmp_0 + self.qc[4]*beta_f_tmp_1 + self.qc[5]*beta_f_tmp_2 - \
+                                    self.qc[1]*beta_f_shifted_1 - self.qc[2]*beta_f_shifted_2
+
+        abz_a0 = self.abz[step][0]
+        abz_a1 = self.abz[step-1][0] if step-1 > 0 else 0.0
+        abz_a2 = self.abz[step-2][0] if step-2 > 0 else 0.0
+        zero_f_tmp_1 = self.zero_f_tmp[step-1] if step-1 > 0 else 0.0
+        zero_f_tmp_2 = self.zero_f_tmp[step-2] if step-2 > 0 else 0.0
+
+        self.zero_f_tmp[step] = self.dc[3]*abz_a0 + self.dc[4]*abz_a1 + self.dc[5]*abz_a2 - \
+                                self.dc[1]*zero_f_tmp_1 - self.dc[2]*zero_f_tmp_2
+
+        zero_f_tmp_0 = self.zero_f_tmp[step]
+        zero_f_tmp_1 = self.zero_f_tmp[step-1] if step-1 > 0 else 0.0
+        zero_f_tmp_2 = self.zero_f_tmp[step-2] if step-2 > 0 else 0.0
+        zero_f_1 = self.zero_f[step-1] if step-1 > 0 else 0.0
+        zero_f_2 = self.zero_f[step-2] if step-2 > 0 else 0.0
+
+        self.zero_f[step] = self.dc[3]*zero_f_tmp_0 + self.dc[4]*zero_f_tmp_1 + self.dc[5]*zero_f_tmp_2 - \
+                            self.dc[1]*zero_f_1 - self.dc[2]*zero_f_2
+
+        zero_f_shifted_1 = self.zero_f_shifted[step-1] if step-1 > 0 else 0.0
+        zero_f_shifted_2 = self.zero_f_shifted[step-2] if step-2 > 0 else 0.0
+        self.zero_f_shifted[step] = self.qc[3]*zero_f_tmp_0 + self.qc[4]*zero_f_tmp_1 + self.qc[5]*zero_f_tmp_2 - \
+                                    self.qc[1]*zero_f_shifted_1 - self.qc[2]*zero_f_shifted_2
+
+    def sogi_pnsc(self, step):
+        self.alpha_p[step] = (self.alpha_f[step] - self.beta_f_shifted[step])*0.5
+        self.alpha_n[step] = (self.alpha_f[step] + self.beta_f_shifted[step])*0.5
+
+        self.beta_p[step] = (self.beta_f[step] + self.alpha_f_shifted[step])*0.5
+        self.beta_n[step] = (self.beta_f[step] - self.alpha_f_shifted[step])*0.5
+
+    def calculate_omega_ff(self, step=1):
+        if self.beta_p[step] < 1e10:
+            if self.alpha_p[step] > 0.0:
+                self.theta_ff[step] = math.pi
+            else:
+                self.theta_ff[step] = -math.pi
+
+        self.theta_ff[step] = math.atan(self.alpha_p[step]/self.beta_p[step])
+        diff = self.theta_ff[step] - self.theta_ff[step-1]
+        if diff < -math.pi:
+            diff += 2*math.pi
+        elif diff > math.pi:
+            diff -= 2*math.pi
+        else:
+            pass
+
+        self.theta_diff[step] = self.lpf_omega_a*diff + (1-self.lpf_omega_a)*self.theta_diff[step-1]
+        self.omega_ff = self.theta_diff[step] * self.Ts
+
+    def track(self, step=1):
         step_1 = step - 1
 
         self.abc[step][0], self.abc[step][1], self.abc[step][2] = \
@@ -216,6 +448,42 @@ class SrfPllPiController:
         self.theta[step] = self.theta[step_1] + self.Ts * self.omega[step] * self.Kw
         self.theta[step] %= (2 * math.pi)
 
+    def sogi_track(self, step=1):
+        step_1 = step - 1
+
+        self.abc[step][0], self.abc[step][1], self.abc[step][2] = \
+            self.calculate_voltage_abc(self.initial_phase, self.sf, step)
+        '''aplha beta transform'''
+        self.abz[step][0], self.abz[step][1], self.abz[step][2] = \
+            self.calculate_abz(self.abc[step][0], self.abc[step][1], self.abc[step][2])
+
+        '''SOGI'''
+        self.calculate_DC_QC(self.omega.item(step-1))
+        self.sogi_ds_qs(step, self.omega[step-1])
+        self.sogi_pnsc(step)
+
+        self.calculate_omega_ff(step)
+
+        dq = self.dq_from_ab(self.alpha_p[step], self.beta_p[step], self.theta_p[step_1])
+        self.dqz[step][0] = dq[0]
+        self.dqz[step][1] = dq[1]
+        # Todo: PI controller for theta_p, theta_n and theta_0
+        # u[n] = u[n - 1] + Kp * (e[n] - e[n - 1]) + Ki * Ts * e[n]
+        self.phi[step] = self.dqz[step][1]
+        self.omega[step] = self.omega[step_1] + \
+            self.Kp * (self.phi[step] - self.phi[step_1]) + \
+            self.Ki * self.Ts * self.phi[step]
+
+        if self.omega[step] > self.omega_max:
+            self.omega[step] = self.omega_max
+        elif self.omega[step] < -self.omega_max:
+            self.omega[step] = -self.omega_max
+        else:
+            # just keep it
+            pass
+
+        self.theta[step] = self.theta[step_1] + self.Ts * self.omega[step] * self.Kw
+        self.theta[step] %= (2 * math.pi)
 
 CONTEXT_SETTINGS = dict(help_option_names=['-h', '--help'])
 @click.group(context_settings=CONTEXT_SETTINGS)
@@ -234,6 +502,7 @@ def run(**kwargs):
 
     pll = SrfPllPiController(cycles=3, noisy=True, imbalance=True)
     pll.sim()
+
 
 if __name__ == "__main__":
     launch_folder = Path(os.getcwd())

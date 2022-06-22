@@ -7,4 +7,9 @@ The python simulation for Synchronous Reference Frame Phase Locked Loop
   conda config --add channels conda-forge
   
 # Introduction
-The program generates a 3 phase voltage signal, executes a DQ0 transform, then tracks the voltage angle with a PI controller
+The program generates a 3 phase voltage signal, executes a DQ0 transform, then
+tracks the voltage angle with a PI controller
+
+# Run
+python main.py run -n 3
+
