@@ -78,7 +78,7 @@ class SrfPllPiController:
         '''
         self._Kw = 1000.0
         self.omega_max = 2*math.pi*self.mf
-        self.omega = np.full((self.total_steps, 1), 2*math.pi, dtype=float)
+        self.omega = np.full((self.total_steps, 1), 2*math.pi*50, dtype=float)
         self.delta_omega = np.zeros((self.total_steps, 1), dtype=float)
         self.theta_ref = np.zeros((self.total_steps, 1), dtype=float)
 
@@ -186,7 +186,7 @@ class SrfPllPiController:
         ax3.plot(t, self.phi, label="Phi")
         #ax3.plot(t, self.omega, label="Omega")
         #ax3.plot(t, self.omega_ff, label="Omega FF")
-        #ax3.plot(t, self.theta_ff, label="Theta FF")
+        ax3.plot(t, self.alpha_p, label="Alpha P")
 
         ax1.legend()
         ax2.legend()
@@ -481,7 +481,7 @@ class SrfPllPiController:
         dq = self.dq_from_ab(self.alpha_p[step], self.beta_p[step], self.theta_p[step_1])
         self.dqz[step][0] = dq[0]
         self.dqz[step][1] = dq[1]
-        self.dqz[step][2] = self.aqz[step][2]
+        self.dqz[step][2] = self.abz[step][2]
 
         # u[n] = u[n - 1] + Kp * (e[n] - e[n - 1]) + Ki * Ts * e[n]
         self.phi[step] = self.dqz[step][1]
