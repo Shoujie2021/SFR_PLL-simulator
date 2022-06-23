@@ -79,6 +79,7 @@ class SrfPllPiController:
         self._Kw = 1000.0
         self.omega_max = 2*math.pi*self.mf
         self.omega = np.full((self.total_steps, 1), 2*math.pi, dtype=float)
+        self.delta_omega = np.zeros((self.total_steps, 1), dtype=float)
         self.theta_ref = np.zeros((self.total_steps, 1), dtype=float)
 
         '''
@@ -113,7 +114,7 @@ class SrfPllPiController:
         self.theta_ff = np.zeros((self.total_steps, 1), dtype=float)
         self.theta_diff = np.zeros((self.total_steps, 1), dtype=float)
         self.omega_ff = np.zeros((self.total_steps, 1), dtype=float)
-        self.lpf_omega_a = 50*self.Ts/(1+50*self.Ts)
+        self.lpf_omega_a = 10*self.Ts/(1+10*self.Ts)
 
         self.V_p = np.zeros((self.total_steps, 1), dtype=float)
         self.V_n = np.zeros((self.total_steps, 1), dtype=float)
@@ -181,9 +182,11 @@ class SrfPllPiController:
         ax4.plot(t, self.abz, label=["alpha", "beta", "zero"])
         ax2.plot(t, self.dqz, label=["d", "q", "z"])
         ax3.plot(t, self.theta_ref, label="Theta ref")
-        ax3.plot(t, self.theta, label="Theta")
+        ax3.plot(t, self.theta_p, label="Theta P")
         ax3.plot(t, self.phi, label="Phi")
         #ax3.plot(t, self.omega, label="Omega")
+        #ax3.plot(t, self.omega_ff, label="Omega FF")
+        #ax3.plot(t, self.theta_ff, label="Theta FF")
 
         ax1.legend()
         ax2.legend()
@@ -292,7 +295,7 @@ class SrfPllPiController:
         phi_z = math.atan(b_z/a_z)
         return v_z, phi_z
 
-    def calculate_DC_QC(self, omega=3.0*2.0*math.pi*50):
+    def calculate_DC_QC(self, omega=1.0*2.0*math.pi*50):
         """
         DCa0, DCa1, DCa2, DCb0, DCb1, DCb2
         QCa0, QCa1, QCa2, QCb0, QCb1, QCb2
@@ -325,7 +328,13 @@ class SrfPllPiController:
 
         return dc, qc
 
-    def sogi_ds_qs(self, step, omega=1.0):
+    def sogi_ds_qs(self, step):
+        """
+        Second order generalized integrator core
+        :param step:
+        :param omega:
+        :return:
+        """
         '''Calculate alpha_f and alpha_f_shifted'''
         abz_a0 = self.abz[step][0]
         abz_a1 = self.abz[step-1][0] if step-1 > 0 else 0.0
@@ -374,6 +383,7 @@ class SrfPllPiController:
         self.beta_f_shifted[step] = self.qc[3]*beta_f_tmp_0 + self.qc[4]*beta_f_tmp_1 + self.qc[5]*beta_f_tmp_2 - \
                                     self.qc[1]*beta_f_shifted_1 - self.qc[2]*beta_f_shifted_2
 
+        '''Calculate zero_f and zero_f_shifted'''
         abz_z0 = self.abz[step][2]
         abz_z1 = self.abz[step-1][2] if step-1 > 0 else 0.0
         abz_z2 = self.abz[step-2][2] if step-2 > 0 else 0.0
@@ -405,23 +415,25 @@ class SrfPllPiController:
         self.beta_n[step] = (self.beta_f[step] - self.alpha_f_shifted[step])*0.5
 
     def calculate_omega_ff(self, step=1):
-        if 1e-20 > self.beta_p[step] > -1e-20:
-            if self.alpha_p[step] > 0.0:
-                self.theta_ff[step] = math.pi
-            else:
-                self.theta_ff[step] = -math.pi
+        minimum = 1e-20
+        if 0 > self.alpha_p[step] > -minimum:
+            self.alpha_p[step] = -minimum
+        elif minimum > self.alpha_p[step] >= 0.0:
+            self.alpha_p[step] = minimum
 
-        self.theta_ff[step] = math.atan(self.alpha_p[step]/self.beta_p[step])
+        self.theta_ff[step] = math.atan(self.beta_p[step]/self.alpha_p[step])
         diff = self.theta_ff[step] - self.theta_ff[step-1]
+        '''
         if diff < -math.pi:
             diff += 2*math.pi
         elif diff > math.pi:
             diff -= 2*math.pi
         else:
             pass
+        '''
 
-        self.theta_diff[step] = self.lpf_omega_a*diff + (1-self.lpf_omega_a)*self.theta_diff[step-1]
-        self.omega_ff = self.theta_diff[step] * self.Ts
+        self.theta_diff[step] = self.lpf_omega_a * diff + (1-self.lpf_omega_a)*self.theta_diff[step-1]
+        self.omega_ff[step] = self.sf * self.theta_diff[step]
 
     def track(self, step=1):
         step_1 = step - 1
@@ -451,15 +463,17 @@ class SrfPllPiController:
     def sogi_track(self, step=1):
         step_1 = step - 1
 
+        '''Generate 3 phase voltage'''
         self.abc[step][0], self.abc[step][1], self.abc[step][2] = \
             self.calculate_voltage_abc(self.initial_phase, self.sf, step)
+
         '''aplha beta transform'''
         self.abz[step][0], self.abz[step][1], self.abz[step][2] = \
             self.calculate_abz(self.abc[step][0], self.abc[step][1], self.abc[step][2])
 
         '''SOGI'''
-        self.calculate_DC_QC(self.omega.item(step-1))
-        self.sogi_ds_qs(step, self.omega[step-1])
+        self.dc, self.qc = self.calculate_DC_QC(self.omega.item(step-1))
+        self.sogi_ds_qs(step)
         self.sogi_pnsc(step)
 
         self.calculate_omega_ff(step)
@@ -467,13 +481,17 @@ class SrfPllPiController:
         dq = self.dq_from_ab(self.alpha_p[step], self.beta_p[step], self.theta_p[step_1])
         self.dqz[step][0] = dq[0]
         self.dqz[step][1] = dq[1]
-        # Todo: PI controller for theta_p, theta_n and theta_0
+        self.dqz[step][2] = self.aqz[step][2]
+
         # u[n] = u[n - 1] + Kp * (e[n] - e[n - 1]) + Ki * Ts * e[n]
         self.phi[step] = self.dqz[step][1]
-        self.omega[step] = self.omega[step_1] + \
-            self.Kp * (self.phi[step] - self.phi[step_1]) + \
-            self.Ki * self.Ts * self.phi[step]
+        pid_p = self.Kp * (self.phi[step] - self.phi[step_1])
+        pid_i = self.Ki * self.Ts * self.phi[step]
+        self.delta_omega[step] = self.delta_omega[step_1] + pid_p + pid_i
 
+        self.omega[step] = self.delta_omega[step] + self.omega_ff[step]
+
+        '''
         if self.omega[step] > self.omega_max:
             self.omega[step] = self.omega_max
         elif self.omega[step] < -self.omega_max:
@@ -481,9 +499,10 @@ class SrfPllPiController:
         else:
             # just keep it
             pass
+        '''
 
-        self.theta[step] = self.theta[step_1] + self.Ts * self.omega[step] * self.Kw
-        self.theta[step] %= (2 * math.pi)
+        self.theta_p[step] = self.theta_p[step_1] + self.Ts * self.omega[step]
+        self.theta_p[step] %= (2 * math.pi)
 
 CONTEXT_SETTINGS = dict(help_option_names=['-h', '--help'])
 @click.group(context_settings=CONTEXT_SETTINGS)
