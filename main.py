@@ -292,7 +292,7 @@ class SrfPllPiController:
         phi_z = math.atan(b_z/a_z)
         return v_z, phi_z
 
-    def calculate_DC_QC(self, omega=9.0*2.0*math.pi*50):
+    def calculate_DC_QC(self, omega=3.0*2.0*math.pi*50):
         """
         DCa0, DCa1, DCa2, DCb0, DCb1, DCb2
         QCa0, QCa1, QCa2, QCb0, QCb1, QCb2
@@ -357,7 +357,7 @@ class SrfPllPiController:
         beta_f_tmp_1 = self.beta_f_tmp[step-1] if step-1 > 0 else 0.0
         beta_f_tmp_2 = self.beta_f_tmp[step-2] if step-2 > 0 else 0.0
 
-        self.beta_f_tmp[step] = self.dc[3]*abz_a0 + self.dc[4]*abz_a1 + self.dc[5]*abz_a2 - \
+        self.beta_f_tmp[step] = self.dc[3]*abz_b0 + self.dc[4]*abz_b1 + self.dc[5]*abz_b2 - \
                                 self.dc[1]*beta_f_tmp_1 - self.dc[2]*beta_f_tmp_2
 
         beta_f_tmp_0 = self.beta_f_tmp[step]
@@ -374,13 +374,13 @@ class SrfPllPiController:
         self.beta_f_shifted[step] = self.qc[3]*beta_f_tmp_0 + self.qc[4]*beta_f_tmp_1 + self.qc[5]*beta_f_tmp_2 - \
                                     self.qc[1]*beta_f_shifted_1 - self.qc[2]*beta_f_shifted_2
 
-        abz_a0 = self.abz[step][0]
-        abz_a1 = self.abz[step-1][0] if step-1 > 0 else 0.0
-        abz_a2 = self.abz[step-2][0] if step-2 > 0 else 0.0
+        abz_z0 = self.abz[step][2]
+        abz_z1 = self.abz[step-1][2] if step-1 > 0 else 0.0
+        abz_z2 = self.abz[step-2][2] if step-2 > 0 else 0.0
         zero_f_tmp_1 = self.zero_f_tmp[step-1] if step-1 > 0 else 0.0
         zero_f_tmp_2 = self.zero_f_tmp[step-2] if step-2 > 0 else 0.0
 
-        self.zero_f_tmp[step] = self.dc[3]*abz_a0 + self.dc[4]*abz_a1 + self.dc[5]*abz_a2 - \
+        self.zero_f_tmp[step] = self.dc[3]*abz_z0 + self.dc[4]*abz_z1 + self.dc[5]*abz_z2 - \
                                 self.dc[1]*zero_f_tmp_1 - self.dc[2]*zero_f_tmp_2
 
         zero_f_tmp_0 = self.zero_f_tmp[step]
@@ -405,7 +405,7 @@ class SrfPllPiController:
         self.beta_n[step] = (self.beta_f[step] - self.alpha_f_shifted[step])*0.5
 
     def calculate_omega_ff(self, step=1):
-        if self.beta_p[step] < 1e10:
+        if 1e-20 > self.beta_p[step] > -1e-20:
             if self.alpha_p[step] > 0.0:
                 self.theta_ff[step] = math.pi
             else:
