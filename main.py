@@ -114,7 +114,8 @@ class SrfPllPiController:
         self.theta_ff = np.zeros((self.total_steps, 1), dtype=float)
         self.theta_diff = np.zeros((self.total_steps, 1), dtype=float)
         self.omega_ff = np.zeros((self.total_steps, 1), dtype=float)
-        self.lpf_omega_a = 10*self.Ts/(1+10*self.Ts)
+        self.lpf_omega_c = 2*math.pi*10
+        self.lpf_omega_a = self.lpf_omega_c*self.Ts/(1+self.lpf_omega_c*self.Ts)
 
         self.V_p = np.zeros((self.total_steps, 1), dtype=float)
         self.V_n = np.zeros((self.total_steps, 1), dtype=float)
@@ -179,14 +180,15 @@ class SrfPllPiController:
 
         t = np.arange(0.0, xlim, self.mf/self.sf)
         ax1.plot(t, self.abc, label=["a", "b", "c"])
-        ax4.plot(t, self.abz, label=["alpha", "beta", "zero"])
         ax2.plot(t, self.dqz, label=["d", "q", "z"])
         ax3.plot(t, self.theta_ref, label="Theta ref")
         ax3.plot(t, self.theta_p, label="Theta P")
         ax3.plot(t, self.phi, label="Phi")
-        #ax3.plot(t, self.omega, label="Omega")
+        ax3.plot(t, self.omega, label="Omega")
         #ax3.plot(t, self.omega_ff, label="Omega FF")
-        ax3.plot(t, self.alpha_p, label="Alpha P")
+        #ax3.plot(t, self.alpha_p, label="Alpha P")
+        #ax3.plot(t, self.beta_p, label="Beta P")
+        ax4.plot(t, self.abz, label=["alpha", "beta", "zero"])
 
         ax1.legend()
         ax2.legend()
@@ -295,6 +297,29 @@ class SrfPllPiController:
         phi_z = math.atan(b_z/a_z)
         return v_z, phi_z
 
+    def calculate_DC_QC_2nd(self, omega=1.0*2.0*math.pi*50):
+        """
+        https://lpsa.swarthmore.edu/LaplaceZTable/LaplaceZFuncTable.html
+        :param omega:
+        :return:
+        """
+        xi = 0.5*self.k_sogi
+        xi_c = math.sqrt(1-xi*xi)
+        omegaT = omega*self.Ts
+        phi = math.acos(xi)
+        EXP_TMP = math.exp(-xi*omegaT)
+
+        DCa0 = 1.0
+        DCa1 = -2*EXP_TMP*math.cos(xi_c*omegaT)
+        DCa2 = EXP_TMP * EXP_TMP
+
+        DCb0 = xi_c
+        DCb1 = -2*EXP_TMP*math.sin(xi_c*omegaT + phi)
+        DCb2 = 0.0
+
+        dc = (DCa0, DCa1, DCa2, DCb0, DCb1, DCb2)
+        pass
+
     def calculate_DC_QC(self, omega=1.0*2.0*math.pi*50):
         """
         DCa0, DCa1, DCa2, DCb0, DCb1, DCb2
@@ -304,13 +329,13 @@ class SrfPllPiController:
         omega2 = omega * omega
         kst = self.k_sogi*self.CONST_S*omega
 
-        dividend = self.CONST_S2 + kst + omega2
+        dividend_r = 1/(self.CONST_S2 + kst + omega2)
 
         DCa0 = 1.0
-        DCa1 = (-2*self.CONST_S2 + 2*omega2)/dividend
-        DCa2 = (self.CONST_S2 - kst + omega2)/dividend
+        DCa1 = (-2*self.CONST_S2 + 2*omega2)*dividend_r
+        DCa2 = (self.CONST_S2 - kst + omega2)*dividend_r
 
-        DCb0 = kst/dividend
+        DCb0 = kst*dividend_r
         DCb1 = 0.0
         DCb2 = -DCb0
 
@@ -320,7 +345,7 @@ class SrfPllPiController:
         QCa1 = DCa1
         QCa2 = DCa2
 
-        QCb0 = self.k_sogi*omega2/dividend
+        QCb0 = self.k_sogi*omega2*dividend_r
         QCb1 = 2*QCb0
         QCb2 = QCb0
 
@@ -332,7 +357,6 @@ class SrfPllPiController:
         """
         Second order generalized integrator core
         :param step:
-        :param omega:
         :return:
         """
         '''Calculate alpha_f and alpha_f_shifted'''
@@ -472,6 +496,7 @@ class SrfPllPiController:
             self.calculate_abz(self.abc[step][0], self.abc[step][1], self.abc[step][2])
 
         '''SOGI'''
+        # self.calculate_DC_QC_2nd(self.omega.item(step-1))
         self.dc, self.qc = self.calculate_DC_QC(self.omega.item(step-1))
         self.sogi_ds_qs(step)
         self.sogi_pnsc(step)
