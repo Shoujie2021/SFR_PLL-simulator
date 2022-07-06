@@ -107,7 +107,9 @@ class SrfPllPiController:
         is just a approximation which is proportional to the genuine omega
         '''
         self._Kw = 1000.0
-        self.omega_max = 2*math.pi*self.mf
+        self.omega_thd = 2*math.pi*self.mf * 0.1
+        self.omega_max = 2*math.pi*self.mf + self.omega_thd
+        self.omega_min = 2*math.pi*self.mf - self.omega_thd
         self.omega = np.full((self.total_steps, 1), 2*math.pi*50, dtype=float)
         self.delta_omega = np.zeros((self.total_steps, 1), dtype=float)
         self.theta_ref = np.zeros((self.total_steps, 1), dtype=float)
@@ -512,8 +514,8 @@ class SrfPllPiController:
 
         if self.omega[step] > self.omega_max:
             self.omega[step] = self.omega_max
-        elif self.omega[step] < -self.omega_max:
-            self.omega[step] = -self.omega_max
+        elif self.omega[step] < self.omega_min:
+            self.omega[step] = self.omega_min
         else:
             # just keep it
             pass
