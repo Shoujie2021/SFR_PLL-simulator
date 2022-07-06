@@ -481,9 +481,7 @@ class SrfPllPiController:
         elif minimum > self.alpha_p[step] >= 0.0:
             self.alpha_p[step] = minimum
 
-        # self.theta_ff[step] = math.atan(self.beta_p[step]/self.alpha_p[step])
-        # simulate tan
-        self.theta_ff[step] = math.atan(math.tan(math.pi*2*50*step/self.sf))
+        self.theta_ff[step] = math.atan(self.beta_p[step]/self.alpha_p[step])
 
         theta_thd = math.pi*0.5*0.60
         upper = math.pi*0.5 - theta_thd
