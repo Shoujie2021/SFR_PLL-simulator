@@ -44,6 +44,36 @@ def get_logger(name='simulation'):
     return logging.getLogger(name)
 
 
+class Sogi:
+    def __init__(self):
+        self.a_i = [0.0, 0.0, 0.0]
+        self.b_i = [0.0, 0.0, 0.0]
+        self.x_n = [0.0, 0.0]
+        self.y_n = [0.0, 0.0]
+        self.index_1 = 1
+        self.index_2 = 0
+
+    def run(self, x):
+        y = self.b_i[0]*x + self.b_i[1]*self.x_n[self.index_1] + self.b_i[2]*self.x_n[self.index_2] - \
+            self.a_i[1]*self.y_n[self.index_1] - self.a_i[2]*self.y_n[self.index_2]
+
+        self.index_1 = (self.index_1 + 1) % 2
+        self.index_2 = (self.index_2 + 1) % 2
+
+        self.x_n[self.index_1] = x
+        self.y_n[self.index_1] = y
+
+        return y
+
+
+class Dfs_sogi(Sogi):
+    pass
+
+
+class Qfs_sogi(Sogi):
+    pass
+
+
 class SrfPllPiController:
     def __init__(self, cycles=10, noisy=False, imbalance=False):
         self.noisy = noisy
@@ -114,7 +144,8 @@ class SrfPllPiController:
         self.theta_ff = np.zeros((self.total_steps, 1), dtype=float)
         self.theta_diff = np.zeros((self.total_steps, 1), dtype=float)
         self.omega_ff = np.zeros((self.total_steps, 1), dtype=float)
-        self.lpf_omega_c = 2*math.pi*10
+        # low pass filter for theta difference, understand the cutoff frequency
+        self.lpf_omega_c = 2*math.pi*1000
         self.lpf_omega_a = self.lpf_omega_c*self.Ts/(1+self.lpf_omega_c*self.Ts)
 
         self.V_p = np.zeros((self.total_steps, 1), dtype=float)
@@ -181,14 +212,16 @@ class SrfPllPiController:
         t = np.arange(0.0, xlim, self.mf/self.sf)
         ax1.plot(t, self.abc, label=["a", "b", "c"])
         ax2.plot(t, self.dqz, label=["d", "q", "z"])
-        ax3.plot(t, self.theta_ref, label="Theta ref")
-        ax3.plot(t, self.theta_p, label="Theta P")
-        ax3.plot(t, self.phi, label="Phi")
-        ax3.plot(t, self.omega, label="Omega")
-        #ax3.plot(t, self.omega_ff, label="Omega FF")
-        #ax3.plot(t, self.alpha_p, label="Alpha P")
+        #ax3.plot(t, self.theta_ref, label="Theta ref")
+        #ax3.plot(t, self.theta_p, label="Theta P")
+        #ax3.plot(t, self.phi, label="Phi")
+        ax3.plot(t, self.theta_ff, label="theta ff")
+        ax3.plot(t, self.theta_diff, label="theta diff")
+        ax3.plot(t, self.omega_ff, label="Omega FF")
         #ax3.plot(t, self.beta_p, label="Beta P")
-        ax4.plot(t, self.abz, label=["alpha", "beta", "zero"])
+        #ax4.plot(t, self.abz, label=["alpha", "beta", "zero"])
+        ax4.plot(t, self.alpha_p, label="Alpha P")
+        ax4.plot(t, self.beta_p, label="Beta P")
 
         ax1.legend()
         ax2.legend()
@@ -256,7 +289,8 @@ class SrfPllPiController:
     def dq_from_ab(self, alpha=0.0, beta=0.0, theta=0.0):
         d = math.cos(theta)*alpha + math.sin(theta)*beta
         q = -math.sin(theta)*alpha + math.cos(theta)*beta
-        return d, q
+        A = math.sqrt(d*d + q*q)
+        return d/A, q/A
 
     def extract_ps(self, a=0.0, b=0.0, c=0.0):
         """
@@ -322,6 +356,8 @@ class SrfPllPiController:
 
     def calculate_DC_QC(self, omega=1.0*2.0*math.pi*50):
         """
+        http://www.williamsonic.com/BodeNyquist/BodeZ.html
+
         DCa0, DCa1, DCa2, DCb0, DCb1, DCb2
         QCa0, QCa1, QCa2, QCb0, QCb1, QCb2
         :return:
@@ -445,19 +481,22 @@ class SrfPllPiController:
         elif minimum > self.alpha_p[step] >= 0.0:
             self.alpha_p[step] = minimum
 
-        self.theta_ff[step] = math.atan(self.beta_p[step]/self.alpha_p[step])
-        diff = self.theta_ff[step] - self.theta_ff[step-1]
-        '''
-        if diff < -math.pi:
-            diff += 2*math.pi
-        elif diff > math.pi:
-            diff -= 2*math.pi
-        else:
-            pass
-        '''
+        # self.theta_ff[step] = math.atan(self.beta_p[step]/self.alpha_p[step])
+        # simulate tan
+        self.theta_ff[step] = math.atan(math.tan(math.pi*2*50*step/self.sf))
 
-        self.theta_diff[step] = self.lpf_omega_a * diff + (1-self.lpf_omega_a)*self.theta_diff[step-1]
-        self.omega_ff[step] = self.sf * self.theta_diff[step]
+        theta_thd = math.pi*0.5*0.60
+        upper = math.pi*0.5 - theta_thd
+        lower = -upper
+        if lower > self.theta_ff[step] or self.theta_ff[step] > upper:
+            self.theta_diff[step] = self.theta_diff[step-1]
+            self.omega_ff[step] = self.omega_ff[step-1]
+            return
+        else:
+            diff = self.theta_ff[step] - self.theta_ff[step - 1]
+            self.theta_diff[step] = self.lpf_omega_a * diff + (1-self.lpf_omega_a)*self.theta_diff[step-1]
+
+            self.omega_ff[step] = self.theta_diff[step] * self.sf
 
     def track(self, step=1):
         step_1 = step - 1
@@ -497,7 +536,7 @@ class SrfPllPiController:
 
         '''SOGI'''
         # self.calculate_DC_QC_2nd(self.omega.item(step-1))
-        self.dc, self.qc = self.calculate_DC_QC(self.omega.item(step-1))
+        self.dc, self.qc = self.calculate_DC_QC()#self.omega.item(step-1))
         self.sogi_ds_qs(step)
         self.sogi_pnsc(step)
 
